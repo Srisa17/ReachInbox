@@ -1,0 +1,118 @@
+// ReachInbox Email Scheduler — data model
+// Postgres, accessed via Prisma Client.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  googleId  String   @unique
+  email     String   @unique
+  name      String
+  avatarUrl String?
+  createdAt DateTime @default(now())
+
+  senders    Sender[]
+  campaigns  Campaign[]
+  emails     ScheduledEmail[]
+  slackIntegration SlackIntegration?
+
+  @@map("users")
+}
+
+/// A "sending identity". Each sender has its own Ethereal test mailbox and
+/// its own hourly send budget, so rate limiting can be enforced per sender.
+model Sender {
+  id                 String   @id @default(uuid())
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label              String
+  etherealEmail      String
+  etherealPass       String
+  etherealSmtpHost   String   @default("smtp.ethereal.email")
+  etherealSmtpPort   Int      @default(587)
+  maxEmailsPerHour   Int      @default(50)
+  minDelayMs         Int      @default(2000)
+  createdAt          DateTime @default(now())
+
+  emails ScheduledEmail[]
+
+  @@map("senders")
+}
+
+model Campaign {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject        String
+  body           String   @db.Text
+  leadsFileName  String?
+  createdAt      DateTime @default(now())
+
+  emails ScheduledEmail[]
+
+  @@map("campaigns")
+}
+
+enum EmailStatus {
+  PENDING
+  QUEUED
+  RESCHEDULED
+  SENT
+  FAILED
+}
+
+/// One row per recipient per campaign. `bullJobId` is also used as the
+/// BullMQ job id, which makes re-enqueue attempts naturally idempotent
+/// (BullMQ refuses to create a second job with the same id).
+model ScheduledEmail {
+  id            String      @id @default(uuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaignId    String
+  campaign      Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  senderId      String
+  sender        Sender      @relation(fields: [senderId], references: [id])
+
+  toEmail       String
+  subject       String
+  body          String      @db.Text
+
+  scheduledFor  DateTime
+  status        EmailStatus @default(PENDING)
+  attempts      Int         @default(0)
+  bullJobId     String?     @unique
+  errorMessage  String?
+  sentAt        DateTime?
+  rescheduleCount Int       @default(0)
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([status, scheduledFor])
+  @@index([senderId, status])
+  @@map("scheduled_emails")
+}
+
+/// Stores the OAuth result of a user connecting their Slack workspace.
+/// A row only exists once a user has completed the OAuth flow; its
+/// absence is the normal "not connected" state (no crash, no notification).
+model SlackIntegration {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId          String
+  teamName        String
+  botAccessToken  String
+  incomingWebhookUrl String
+  channel         String?
+  connectedAt     DateTime @default(now())
+
+  @@map("slack_integrations")
+}
